@@ -5,6 +5,7 @@ pipeline {
             steps {
                 checkout scm    
             }
+        }
         stage('Install Dependencies') {
             steps {
                 echo "Installing Node.js dependencies..."
@@ -22,10 +23,11 @@ pipeline {
                 bat 'copy build.js build\\'
                 echo "Build completed!"     
             }
+        }
         stage('Archive Artifacts') {
             steps {
                 echo "Archiving build artifacts..."
                 archiveArtifacts artifacts: '**/build/**', allowEmptyArchive: true  
             }  
-              
-}
+        }      
+   }

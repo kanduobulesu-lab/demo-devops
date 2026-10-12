@@ -25,3 +25,8 @@ jobs:
     - run: npm ci
     - run: npm run build --if-present
 #    - run: npm test
+    - name: upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: demo-devops-artifacts
+        path: build/

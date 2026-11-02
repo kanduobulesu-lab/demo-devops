@@ -1,0 +1,84 @@
+name: Demo Devops Build and Test
+
+on:
+  push:
+    branches:
+      - 'feature/*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_STEP_DEBUG: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.7'
+
+      - name: Verify Terraform
+        run: |
+          terraform -version
+
+      - name: Set up Node.js 22.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+
+      - name: Install dependencies and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: 'ap-south-1'
+
+      # Quick validation step: show which AWS identity the runner is using.
+      # This will fail with the same signature error if the keys are wrong,
+      # or succeed when configure-aws-credentials worked (static keys or assumed role).
+      - name: Validate AWS credentials
+        run: |
+          echo "Testing AWS credentials and caller identity"
+          aws sts get-caller-identity --region ap-south-1
+
+      # If you'd prefer to use GitHub OIDC (recommended) and assume an IAM role,
+      # replace the Configure AWS credentials step above with this (and set
+      # `secrets.AWS_ROLE_TO_ASSUME` to the role ARN):
+      # - name: Configure AWS credentials (OIDC / assume role)
+      #   uses: aws-actions/configure-aws-credentials@v2
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      #     aws-region: 'ap-south-1'
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Docker image
+        run: |
+          docker build -t demo-devops:latest .
+
+      - name: Tag and push Docker image to ECR
+        env:
+          AWS_REGION: 'ap-south-1'
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          ECR_REPOSITORY="devops/demo-project"
+          IMAGE_TAG="latest"
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" || \
+            aws ecr create-repository --repository-name "$ECR_REPOSITORY"
+          docker tag demo-devops:latest "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      

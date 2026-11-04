@@ -1,0 +1,14 @@
+# Elastic Beanstalk ignore file
+node_modules/
+.git/
+.github/
+*.log
+*.md
+.env
+.DS_Store
+build/
+Terraform/
+k8s/
+*.sh
+Jenkinsfile*
+.dockerignore

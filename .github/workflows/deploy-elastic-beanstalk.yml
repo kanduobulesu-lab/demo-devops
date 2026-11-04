@@ -1,0 +1,348 @@
+name: Deploy to Elastic Beanstalk
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Deploy or cleanup'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - cleanup
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  AWS_REGION: ap-south-1
+  EB_APPLICATION_NAME: demo-devops-app
+  EB_ENVIRONMENT_NAME: demo-devops-env
+  EB_PLATFORM: "Docker running on 64bit Amazon Linux 2"
+  S3_BUCKET_NAME: demo-devops-eb-deployments
+
+jobs:
+  deploy:
+    if: github.event_name == 'push' || inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create S3 bucket for deployments
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          S3_BUCKET="${{ env.S3_BUCKET_NAME }}-${ACCOUNT_ID}"
+          
+          echo "========================================="
+          echo "Setting up S3 bucket for EB deployments"
+          echo "Bucket: $S3_BUCKET"
+          echo "========================================="
+          
+          if aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
+            echo "✓ S3 bucket already exists"
+          else
+            echo "Creating S3 bucket..."
+            aws s3api create-bucket \
+              --bucket "$S3_BUCKET" \
+              --region ${{ env.AWS_REGION }} \
+              --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+            
+            # Enable versioning
+            aws s3api put-bucket-versioning \
+              --bucket "$S3_BUCKET" \
+              --versioning-configuration Status=Enabled
+            
+            echo "✓ S3 bucket created"
+          fi
+          
+          echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+
+      - name: Create Elastic Beanstalk Application
+        run: |
+          echo "========================================="
+          echo "Creating EB Application"
+          echo "========================================="
+          
+          if aws elasticbeanstalk describe-applications \
+            --application-names ${{ env.EB_APPLICATION_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "ApplicationName"; then
+            echo "✓ EB Application already exists"
+          else
+            echo "Creating EB Application..."
+            aws elasticbeanstalk create-application \
+              --application-name ${{ env.EB_APPLICATION_NAME }} \
+              --description "Demo DevOps Node.js Application" \
+              --region ${{ env.AWS_REGION }}
+            echo "✓ EB Application created"
+          fi
+
+      - name: Package application
+        run: |
+          VERSION_LABEL="${{ env.EB_APPLICATION_NAME }}-${{ github.sha }}-$(date +%s)"
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
+          
+          echo "========================================="
+          echo "Packaging Application"
+          echo "Version: $VERSION_LABEL"
+          echo "========================================="
+          
+          # Create deployment package
+          zip -r deploy.zip . \
+            -x "*.git*" \
+            -x "*node_modules*" \
+            -x "*.github*" \
+            -x "*Terraform*" \
+            -x "*k8s*" \
+            -x "*.sh" \
+            -x "*Jenkinsfile*" \
+            -x "*.md" \
+            -x "*build/*"
+          
+          echo "✓ Application packaged"
+          ls -lh deploy.zip
+
+      - name: Upload to S3
+        run: |
+          echo "========================================="
+          echo "Uploading to S3"
+          echo "========================================="
+          
+          aws s3 cp deploy.zip \
+            s3://${{ env.S3_BUCKET }}/${{ env.VERSION_LABEL }}.zip
+          
+          echo "✓ Uploaded to S3"
+
+      - name: Create Application Version
+        run: |
+          echo "========================================="
+          echo "Creating Application Version"
+          echo "========================================="
+          
+          aws elasticbeanstalk create-application-version \
+            --application-name ${{ env.EB_APPLICATION_NAME }} \
+            --version-label ${{ env.VERSION_LABEL }} \
+            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.VERSION_LABEL }}.zip" \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✓ Application version created"
+
+      - name: Create or Update Environment
+        run: |
+          echo "========================================="
+          echo "Deploying to Elastic Beanstalk"
+          echo "========================================="
+          
+          # Check if environment exists
+          if aws elasticbeanstalk describe-environments \
+            --application-name ${{ env.EB_APPLICATION_NAME }} \
+            --environment-names ${{ env.EB_ENVIRONMENT_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "EnvironmentName"; then
+            
+            echo "Environment exists, updating..."
+            aws elasticbeanstalk update-environment \
+              --application-name ${{ env.EB_APPLICATION_NAME }} \
+              --environment-name ${{ env.EB_ENVIRONMENT_NAME }} \
+              --version-label ${{ env.VERSION_LABEL }} \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "✓ Environment update initiated"
+          else
+            echo "Creating new environment..."
+            aws elasticbeanstalk create-environment \
+              --application-name ${{ env.EB_APPLICATION_NAME }} \
+              --environment-name ${{ env.EB_ENVIRONMENT_NAME }} \
+              --version-label ${{ env.VERSION_LABEL }} \
+              --solution-stack-name "${{ env.EB_PLATFORM }}" \
+              --option-settings \
+                Namespace=aws:autoscaling:launchconfiguration,OptionName=InstanceType,Value=t2.micro \
+                Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role \
+                Namespace=aws:elasticbeanstalk:environment,OptionName=EnvironmentType,Value=SingleInstance \
+                Namespace=aws:elasticbeanstalk:application:environment,OptionName=PORT,Value=3000 \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "✓ Environment creation initiated"
+          fi
+
+      - name: Wait for Environment
+        run: |
+          echo "========================================="
+          echo "Waiting for environment to be ready"
+          echo "========================================="
+          
+          for i in {1..60}; do
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --application-name ${{ env.EB_APPLICATION_NAME }} \
+              --environment-names ${{ env.EB_ENVIRONMENT_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query "Environments[0].Status" \
+              --output text)
+            
+            HEALTH=$(aws elasticbeanstalk describe-environments \
+              --application-name ${{ env.EB_APPLICATION_NAME }} \
+              --environment-names ${{ env.EB_ENVIRONMENT_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query "Environments[0].Health" \
+              --output text)
+            
+            echo "Attempt $i/60 - Status: $STATUS, Health: $HEALTH"
+            
+            if [ "$STATUS" = "Ready" ] && [ "$HEALTH" != "Grey" ]; then
+              echo "✓ Environment is ready!"
+              break
+            fi
+            
+            if [ "$STATUS" = "Terminated" ]; then
+              echo "❌ Environment deployment failed"
+              exit 1
+            fi
+            
+            sleep 30
+          done
+
+      - name: Get Environment URL
+        id: get-url
+        run: |
+          URL=$(aws elasticbeanstalk describe-environments \
+            --application-name ${{ env.EB_APPLICATION_NAME }} \
+            --environment-names ${{ env.EB_ENVIRONMENT_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Environments[0].CNAME" \
+            --output text)
+          
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Application URL: http://$URL"
+
+      - name: Deployment Summary
+        run: |
+          echo "## Elastic Beanstalk Deployment Successful! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Application Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Application**: ${{ env.EB_APPLICATION_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ env.EB_ENVIRONMENT_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ env.VERSION_LABEL }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: http://${{ steps.get-url.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### S3 Bucket" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bucket**: ${{ env.S3_BUCKET }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Access Your Application" >> $GITHUB_STEP_SUMMARY
+          echo "Visit: http://${{ steps.get-url.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+
+  cleanup:
+    if: inputs.action == 'cleanup'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terminate Environment
+        continue-on-error: true
+        run: |
+          echo "========================================="
+          echo "Terminating EB Environment"
+          echo "========================================="
+          
+          if aws elasticbeanstalk describe-environments \
+            --application-name ${{ env.EB_APPLICATION_NAME }} \
+            --environment-names ${{ env.EB_ENVIRONMENT_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "EnvironmentName"; then
+            
+            aws elasticbeanstalk terminate-environment \
+              --environment-name ${{ env.EB_ENVIRONMENT_NAME }} \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "Waiting for environment to terminate..."
+            for i in {1..40}; do
+              STATUS=$(aws elasticbeanstalk describe-environments \
+                --application-name ${{ env.EB_APPLICATION_NAME }} \
+                --environment-names ${{ env.EB_ENVIRONMENT_NAME }} \
+                --region ${{ env.AWS_REGION }} \
+                --query "Environments[0].Status" \
+                --output text 2>/dev/null || echo "Terminated")
+              
+              echo "Attempt $i/40 - Status: $STATUS"
+              
+              if [ "$STATUS" = "Terminated" ] || [ "$STATUS" = "None" ]; then
+                echo "✓ Environment terminated"
+                break
+              fi
+              
+              sleep 15
+            done
+          else
+            echo "Environment does not exist"
+          fi
+
+      - name: Delete Application
+        continue-on-error: true
+        run: |
+          echo "========================================="
+          echo "Deleting EB Application"
+          echo "========================================="
+          
+          if aws elasticbeanstalk describe-applications \
+            --application-names ${{ env.EB_APPLICATION_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "ApplicationName"; then
+            
+            aws elasticbeanstalk delete-application \
+              --application-name ${{ env.EB_APPLICATION_NAME }} \
+              --terminate-env-by-force \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "✓ Application deleted"
+          else
+            echo "Application does not exist"
+          fi
+
+      - name: Delete S3 Bucket
+        continue-on-error: true
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          S3_BUCKET="${{ env.S3_BUCKET_NAME }}-${ACCOUNT_ID}"
+          
+          echo "========================================="
+          echo "Deleting S3 Bucket"
+          echo "========================================="
+          
+          if aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
+            echo "Emptying bucket..."
+            aws s3 rm s3://$S3_BUCKET --recursive
+            
+            echo "Deleting bucket..."
+            aws s3api delete-bucket --bucket "$S3_BUCKET" --region ${{ env.AWS_REGION }}
+            
+            echo "✓ S3 bucket deleted"
+          else
+            echo "S3 bucket does not exist"
+          fi
+
+      - name: Cleanup Summary
+        run: |
+          echo "## Cleanup Complete! ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resources Removed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Elastic Beanstalk Environment" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Elastic Beanstalk Application" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ S3 Deployment Bucket" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All Elastic Beanstalk resources have been cleaned up." >> $GITHUB_STEP_SUMMARY

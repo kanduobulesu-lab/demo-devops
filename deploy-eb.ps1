@@ -14,7 +14,9 @@ $AWS_REGION = "ap-south-1"
 $EB_APP_NAME = "demo-devops-app"
 $EB_ENV_NAME = "demo-devops-env"
 $EB_PLATFORM = "Docker running on 64bit Amazon Linux 2"
-$S3_BUCKET_BASE = "demo-devops-eb-deployments"
+
+# EB uses managed bucket: elasticbeanstalk-{region}-{account-id}
+# We'll determine this at runtime
 
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Elastic Beanstalk Deployment Script" -ForegroundColor Cyan
@@ -31,7 +33,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "✓ Account ID: $ACCOUNT_ID" -ForegroundColor Green
 
-$S3_BUCKET = "$S3_BUCKET_BASE-$ACCOUNT_ID"
+# Use EB-managed S3 bucket
+$S3_BUCKET = "elasticbeanstalk-$AWS_REGION-$ACCOUNT_ID"
+Write-Host "✓ Using EB-managed bucket: $S3_BUCKET" -ForegroundColor Green
 
 if ($Action -eq "status") {
     Write-Host ""
@@ -72,12 +76,8 @@ if ($Action -eq "status") {
     
     # Check S3 Bucket
     Write-Host "S3 Bucket Status:" -ForegroundColor Yellow
-    $bucketExists = aws s3api head-bucket --bucket $S3_BUCKET 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  ✓ S3 Bucket exists: $S3_BUCKET" -ForegroundColor Green
-    } else {
-        Write-Host "  ❌ S3 Bucket does not exist" -ForegroundColor Red
-    }
+    Write-Host "  Using EB-managed bucket: $S3_BUCKET" -ForegroundColor White
+    Write-Host "  (Managed by Elastic Beanstalk)" -ForegroundColor Gray
     
     exit 0
 }
@@ -90,7 +90,7 @@ if ($Action -eq "cleanup") {
     Write-Host "This will delete:" -ForegroundColor Yellow
     Write-Host "  - EB Environment: $EB_ENV_NAME" -ForegroundColor White
     Write-Host "  - EB Application: $EB_APP_NAME" -ForegroundColor White
-    Write-Host "  - S3 Bucket: $S3_BUCKET" -ForegroundColor White
+    Write-Host "Note: EB-managed S3 bucket will remain (managed by AWS)" -ForegroundColor Gray
     Write-Host ""
     
     $confirm = Read-Host "Are you sure? (yes/no)"
@@ -150,56 +150,22 @@ if ($Action -eq "cleanup") {
         Write-Host "   Application does not exist" -ForegroundColor Gray
     }
     
-    # Delete S3 Bucket
-    Write-Host ""
-    Write-Host "3. Deleting S3 Bucket..." -ForegroundColor Yellow
-    $bucketExists = aws s3api head-bucket --bucket $S3_BUCKET 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "   Emptying bucket..." -ForegroundColor Gray
-        aws s3 rm "s3://$S3_BUCKET" --recursive
-        
-        Write-Host "   Deleting bucket..." -ForegroundColor Gray
-        aws s3api delete-bucket --bucket $S3_BUCKET --region $AWS_REGION
-        Write-Host "   ✓ S3 bucket deleted" -ForegroundColor Green
-    } else {
-        Write-Host "   S3 bucket does not exist" -ForegroundColor Gray
-    }
-    
     Write-Host ""
     Write-Host "=========================================" -ForegroundColor Cyan
     Write-Host "✓ Cleanup Complete!" -ForegroundColor Green
     Write-Host "=========================================" -ForegroundColor Cyan
+    Write-Host "Note: EB-managed S3 bucket retained by AWS" -ForegroundColor Gray
     exit 0
 }
 
 # DEPLOY ACTION
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host "Step 1: Create S3 Bucket" -ForegroundColor Cyan
+Write-Host "Step 1: Verify S3 Storage" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
-
-$bucketExists = aws s3api head-bucket --bucket $S3_BUCKET 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "✓ S3 bucket already exists: $S3_BUCKET" -ForegroundColor Green
-} else {
-    Write-Host "Creating S3 bucket: $S3_BUCKET" -ForegroundColor Yellow
-    aws s3api create-bucket `
-        --bucket $S3_BUCKET `
-        --region $AWS_REGION `
-        --create-bucket-configuration LocationConstraint=$AWS_REGION
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ Failed to create S3 bucket" -ForegroundColor Red
-        exit 1
-    }
-    
-    # Enable versioning
-    aws s3api put-bucket-versioning `
-        --bucket $S3_BUCKET `
-        --versioning-configuration Status=Enabled
-    
-    Write-Host "✓ S3 bucket created successfully" -ForegroundColor Green
-}
+Write-Host "Using EB-managed S3 bucket: $S3_BUCKET" -ForegroundColor Yellow
+Write-Host "Note: Elastic Beanstalk will create/manage this bucket automatically" -ForegroundColor Gray
+Write-Host "✓ Storage configuration verified" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan

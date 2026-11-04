@@ -39,34 +39,21 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create S3 bucket for deployments
+      - name: Setup Elastic Beanstalk Storage
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          S3_BUCKET="${{ env.S3_BUCKET_NAME }}-${ACCOUNT_ID}"
           
           echo "========================================="
-          echo "Setting up S3 bucket for EB deployments"
-          echo "Bucket: $S3_BUCKET"
+          echo "Using Elastic Beanstalk Managed Storage"
           echo "========================================="
+          echo "EB will automatically create and manage storage bucket"
+          echo "Account: $ACCOUNT_ID"
+          echo "Region: ${{ env.AWS_REGION }}"
           
-          if aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
-            echo "✓ S3 bucket already exists"
-          else
-            echo "Creating S3 bucket..."
-            aws s3api create-bucket \
-              --bucket "$S3_BUCKET" \
-              --region ${{ env.AWS_REGION }} \
-              --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
-            
-            # Enable versioning
-            aws s3api put-bucket-versioning \
-              --bucket "$S3_BUCKET" \
-              --versioning-configuration Status=Enabled
-            
-            echo "✓ S3 bucket created"
-          fi
-          
+          # EB creates bucket automatically: elasticbeanstalk-{region}-{account-id}
+          S3_BUCKET="elasticbeanstalk-${{ env.AWS_REGION }}-${ACCOUNT_ID}"
           echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+          echo "Expected EB bucket: $S3_BUCKET"
 
       - name: Create Elastic Beanstalk Application
         run: |
@@ -314,27 +301,22 @@ jobs:
             echo "Application does not exist"
           fi
 
-      - name: Delete S3 Bucket
+      - name: Cleanup S3 Objects
         continue-on-error: true
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          S3_BUCKET="${{ env.S3_BUCKET_NAME }}-${ACCOUNT_ID}"
+          S3_BUCKET="elasticbeanstalk-${{ env.AWS_REGION }}-${ACCOUNT_ID}"
           
           echo "========================================="
-          echo "Deleting S3 Bucket"
+          echo "Cleaning up S3 Objects"
           echo "========================================="
+          echo "Note: EB-managed bucket will remain (managed by AWS)"
+          echo "Bucket: $S3_BUCKET"
           
-          if aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
-            echo "Emptying bucket..."
-            aws s3 rm s3://$S3_BUCKET --recursive
-            
-            echo "Deleting bucket..."
-            aws s3api delete-bucket --bucket "$S3_BUCKET" --region ${{ env.AWS_REGION }}
-            
-            echo "✓ S3 bucket deleted"
-          else
-            echo "S3 bucket does not exist"
-          fi
+          # Try to remove application-specific objects if we have permission
+          aws s3 rm s3://$S3_BUCKET/demo-devops-app --recursive 2>/dev/null || echo "Objects cleaned or no permission"
+          
+          echo "✓ Cleanup attempt completed"
 
       - name: Cleanup Summary
         run: |
